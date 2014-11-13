@@ -3,7 +3,7 @@ and a few convenience functions for validating data inputs
 """
 
 """
-Copyright (c) <2014>, <Neil Thomas>, <NeilT-UK>, <dc_fm@hotmail.com>
+Copyright (c) <2014>, <NeilT-UK>
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
