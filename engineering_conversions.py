@@ -14,7 +14,7 @@ subs = { 0: u'',
 subs_inv = {subs[i]:i for i in subs if i!=0}   
 subs_inv[u'\u00b5'] = -6
 
-def eng_str(x, digits=4, limits=(-12, 9), greek=False):
+def eng_str(x, digits=None, limits=(-12, 9), greek=False):
     """ return an engineering formatted unicode string representation
 
     That's basically an exponential format
@@ -44,31 +44,63 @@ def eng_str(x, digits=4, limits=(-12, 9), greek=False):
     '31.235e-15'
     >>> eng_str(3e-14, 3, limits=(-24,24))
     '30f'
+    >>> eng_str(314.15927e-22)
+    '31.415927e-21'
+    >>> eng_str(314.15927)
+    '314.15927'
+    >>> eng_str(3141.5927)
+    '3.1415927k'
+    >>> eng_str(0.00234)
+    '2.34m'
     
     """
 
-    # let the e format do the heavy lifting (scaling, rounding, conversion)
-    # e format produces one digit before the point, and dp digits after
-    
-    # use int to be very accepting about how digits is specified
-    dp = max((0, int(digits)-1))
-    # drop the sign now with abs, we'll replace it later
+    # capture the sign
     if x<0:
         sign = u'-'
     else:
         sign = u''
-    x_str = u'{:.{dp}e}'.format(abs(x), dp=dp)
-    # split the mantissa and exponent
-    (mant, exp) = x_str.split(u'e')    
-    exp = int(exp)
-    
-    # drop the dp from the mantissa and pad with zeroes to simplify scaling
-    mant = mant.replace(u'.', u'')+u'00'
+    # and lose it from the number
+    absx = abs(x)
+
+    if digits:
+        # if number of digits specified, use e format
+        # it always produces one digit before the point, and dp digits after
+        # use int to be very accepting about how digits is specified
+        dp = max((0, int(digits)-1))
+        x_str = u'{:.{dp}e}'.format(absx, dp=dp)
+        (mant, exp) = x_str.split(u'e')
+        # drop the dp from the mantissa and pad with zeroes to simplify scaling
+        mant = mant.replace(u'.', u'')+u'00'
+        exp = int(exp)
+        dp_pos = 1
+    else:
+        # use str() to get all the digits it thinks are relevant
+        # unfortunately it has a variable format for numbers close to unity
+        #print(absx)
+        x_str = str(absx)
+        #print(x_str)
+        if 'e' in x_str:      # it's normalised like e format
+            (mant, exp) = x_str.split(u'e')    # so we can pull it apart like e
+            mant = mant.replace(u'.', u'')+u'00'
+            exp = int(exp)
+            dp_pos = 1
+        else:      # it's non-normalised, with an exponent of 0
+            mant = x_str
+            exp = 0
+            dp_pos = x_str.index('.')
+            mant = mant.replace(u'.', u'')+u'00'
+            while mant[0]=='0':     # if we have leading zeros
+                exp -= 1
+                mant = mant[1:]
+
+            
+
 
     # find out how far we are from a multiple of 3, sn = shift_needed
     sn = exp%3      # modulus works in the correct direction for -ve as well
     # re-insert the dp, and adjust the exponent, to the shift_needed
-    m_str = mant[:(1+sn)]+'.'+mant[(1+sn):]
+    m_str = mant[:(dp_pos+sn)]+'.'+mant[(dp_pos+sn):]
     exp -= sn
 
     # now trim the trailing zeros, then the trailing point if remaining
