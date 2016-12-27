@@ -3,7 +3,7 @@ and a few convenience functions for validating data inputs
 """
 
 """
-Copyright (c) <2014>, <NeilT-UK>
+Copyright (c) <2014>, <Neil Thomas>, <NeilT-UK>, <dc_fm@hotmail.com>
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -32,7 +32,7 @@ either expressed or implied, of the FreeBSD Project.
 """
 
 # works with Python 3.4
-# believed to work under Python 2.7
+# should work with Python 2.7
 
 try:
     # Python 3 spelling
@@ -46,9 +46,9 @@ except ImportError:
     import tkFileDialog as tkf
 import json
 
-class MyLabelEntry(tki.Frame):
+class EntryLine(tki.Frame):
     """ a combination of label, entry and help button, for validated gui entry of data"""
-    def __init__(self, parent, text='no label', data='', conv=None, update=None, width=15):
+    def __init__(self, parent, text='no label', data='', conv=None, update=None, width=15, default=None):
         """ text    optional    used to label the entry
         
             data    optional    used to initialise the Entry box
@@ -57,7 +57,7 @@ class MyLabelEntry(tki.Frame):
             conv    optional    conversion function, which also validates the entry
                                 note that int, float and str can be used
                                 return string unchanged (str) if omitted or None
-                                return object if entry is valid
+                                conv must return object if entry is valid
                                 its __doc__ string is available as help
                                 if the docstring starts with [x], x is put on the help button
                                 (TODO have to work on tooltips sometime!)
@@ -65,13 +65,22 @@ class MyLabelEntry(tki.Frame):
                                 The err from ValueError is saved for the help button
                                 so more info can be given about failure to validate
 
+            update  optional    the name of the function to call when entries are updated
+                                needed for the execute when all valid functionality
+
             width   optional    defaults to 15, maybe should make this adaptive sometime
+
+            default optional    defaults to None
+                                returns if the text string produces an invalid result
+                                allows .get() to be called asynchronously, and return valid
+                                results to the calling program
 
         """
         tki.Frame.__init__(self, master=parent) # tki refuses to work with super!
         self.update = update
         self.conv = conv
         self.text = text
+        self.default = default
         
         # init the properties
         self.err = ''
@@ -155,7 +164,10 @@ class MyLabelEntry(tki.Frame):
             self.err = ''
             self.valid = True
         except ValueError as err:
-            self.value = None
+            try:
+                self.value = self.conv(self.default)   # we convert the default value
+            except (TypeError, ValueError):
+                self.value = self.default   # which if it can't be converted (None) is returned intact
             self.entry.config(bg='orange')
             self.err = err
             self.valid = False
@@ -167,7 +179,10 @@ class MyLabelEntry(tki.Frame):
 
 class GUI_inputs(tki.LabelFrame):
     """ A GUI data input convenience class, with tab-able fields and verified data"""
-    def __init__(self, parent, text="Neil's Input Widget", execute=None, loadsave=None, **kwargs):
+    def __init__(self, parent, text="Neil's Input Widget", execute=None,
+                                                           exec_label='execute',
+                                                           loadsave=None,
+                                                           **kwargs):
         """ initialise with text for the LabelFrame
 
             set execute to the name of a function to be called on execute
@@ -184,9 +199,10 @@ class GUI_inputs(tki.LabelFrame):
        
         # if there's a execute supplied, put up a button for it, on the last row
         self.execute_func = execute
+        self.exec_label = exec_label
         if execute:
             # an execute button
-            self.execute_but = tki.Button(self, text='execute',
+            self.execute_but = tki.Button(self, text=self.exec_label,
                                            command=self.execute_func,
                                            state=tki.DISABLED)
             self.execute_but.grid(row=99, column=1) #MAXROWS anyone?
@@ -201,6 +217,41 @@ class GUI_inputs(tki.LabelFrame):
             self.load_but.grid(row=100, column=0)
             self.save_but = tki.Button(self, text='save', command=self._save_func)
             self.save_but.grid(row=100, column=1)
+            
+
+    def add(self, key, disp_name='', data='', conv=None, default=None):
+        """ add a new data entry line to the input widget
+
+        key         required    key for the entry, must be unique on this widget
+                                the returned dict uses this as the key
+                                use a string, but other objects do work as well
+                                
+        disp_name   optional    labels the data entry, uses the key if omitted
+
+        data        optional    initial string data for the entry box
+
+        conv        optional    A function, that takes a string, returns an object
+                                or raises ValueError if it can't understand the string
+                                int and float do this
+
+        default     optional    When GUI_inputs is the client, execute is always greyed
+                                if there are any invalid entries. However as a server,
+                                .get() might be called when entries are invalid. Default
+                                provides a default response for invalid entries, to avoid
+                                the calling program having to try: all return values                                    
+        """
+
+        if key in self.entries:
+            raise ValueError('duplicate key name >>>{}<<<'.format(key))
+
+        if not disp_name:
+            disp_name = str(key)
+
+        mle = EntryLine(self, disp_name, data, conv, self.update, default=default, **self.kwargs)
+        mle.grid(row=self.row, column=0, columnspan=2)
+        self.row += 1
+        self.entries[key] = mle
+        
 
     def _load_func(self):
         """ read a json encoded list of tuples
@@ -263,27 +314,13 @@ class GUI_inputs(tki.LabelFrame):
         else:
             print(save_stuff)
         
-    def add(self, key, disp_name='', data='', conv=None):
-        """ add a new line to the input widget
 
-        key         required    key for the entry, must be unique
-        other arguments follow from MyLabelEntry() usage above                                     
-        """
-
-        if key in self.entries:
-            raise ValueError('duplicate key name >>>{}<<<'.format(key))
-
-        if not disp_name:
-            disp_name = str(key)
-
-        mle = MyLabelEntry(self, disp_name, data, conv, self.update, **self.kwargs)
-        mle.grid(row=self.row, column=0, columnspan=2)
-        self.row += 1
-        self.entries[key] = mle
 
     def update(self, enter=False):
-        """ called when something has changed, or enter has been hit"""
-        """ this is a clumsy interface, not sure its well thought out"""
+        """ called when something has changed, or enter has been hit
+        this is a clumsy interface, not sure its well thought out
+        in fact it confused me when I returned to the code
+        but now I think I know what's going on"""
         # only need to worry about this when there's a execute button to handle
         if self.execute_func:
             # get the valid properties of each entry
@@ -376,13 +413,17 @@ if __name__ == '__main__':
    
     full = GUI_inputs(root, 'full fat', execute=execute_func, loadsave=True, width=20)
     full.pack()
-    full.add('we')
+    full.add('examp 1')
     full.add('we1', conv=str, data=3)
+    full.add('an int', conv=int, default=7)
     full.add('we2', 'disp4we2', data=999)
-    full.add('pair', 'f_pair', '3,4', float_pair )
+    full.add('pair', 'f_pair', '3,4', float_pair, default='7,8' )
     full.add('adr', 'hex address', '0xC0DE', int16)
     full.add('float_list', 'float list', '3, 4, 5', list_of_floats, )
     full.add('cryp', 'no doc string', 6, cryptic_conv)
+
+    get_but = tki.Button(root, text='force get', command=execute_func)
+    get_but.pack()
 
     root.mainloop()
         
