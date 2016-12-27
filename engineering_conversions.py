@@ -1,196 +1,482 @@
-__all__ = ['eng_str', 'eng_float']
+""" The engineering_conversions module
 
-subs = { 0: u'',
-         3: u'k',  -3: u'm',
-         6: u'M',  -6: u'u',
-         9: u'G',  -9: u'n',
-        12: u'T', -12: u'p',
-        15: u'P', -15: u'f',
-        18: u'E', -18: u'a',   # what f*kwit at the BIPM thought up E?
-        21: u'Z', -21: u'z',
-        24: u'Y', -24: u'y'}
+This provides two functions
+eng_float() which behaves like float()
+eng_str() which behaves like str()
+but use engineering powers of 1000, and BIPM text multipliers like k and G
 
-# invert the dict for parsing eng formats easily, leave out the 0, add the mu
-subs_inv = {subs[i]:i for i in subs if i!=0}   
-subs_inv[u'\u00b5'] = -6
+In the spirit of 'talk exact, listen forgiving', eng_float() understands all prefixes
+defined by BIPM, both unicode micro characters, and strings like meg and Mega used by SPICE
 
-def eng_str(x, digits=None, limits=(-12, 9), greek=False):
-    """ return an engineering formatted unicode string representation
+>>> eng_float('12u6')
+1.26e-05
+>>> eng_str(1e7)
+'10M'
 
-    That's basically an exponential format
-    with the exponent a multiple of 3,
-    replaced with a standard multiplier suffix when possible
+"""
 
-    use at most 'digits', though some roundings may produce fewer  
-    limits allows a restricted range of letter replacement (either order)
-    the default limit (-12, 9) is pico to Giga
-    if greek is true, use a unicode micro, otherwise use 'u'
+"""
+Copyright (c) <2016>, <Neil Thomas>, <NeilT-UK>, <dc_fm@hotmail.com>
+All rights reserved.
 
-    This version only creates the suffix version, no option for infix
-    This version always produces the shortest number,
-    removing trailing zeros and a bare decimal point when possible
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
 
-    >>> eng_str(1.2345, 3)
-    '1.23'
-    >>> eng_str(123.45, 3)
-    '123'
-    >>> eng_str(1234.5e4, 3)
-    '12.3M'
-    >>> eng_str(0.0003, 3)
-    '300u'
-    >>> eng_str(0.0003, 3, greek=True)
-    '300\u00b5'
-    >>> eng_str(31.2345e-15, 5)
-    '31.235e-15'
-    >>> eng_str(3e-14, 3, limits=(-24,24))
-    '30f'
-    >>> eng_str(314.15927e-22)
-    '31.415927e-21'
-    >>> eng_str(314.15927)
-    '314.15927'
-    >>> eng_str(3141.5927)
-    '3.1415927k'
-    >>> eng_str(0.00234)
-    '2.34m'
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer. 
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+The views and conclusions contained in the software and documentation are those
+of the authors and should not be interpreted as representing official policies, 
+either expressed or implied, of the FreeBSD Project.
+"""
+
+version = '2.0.1   Dec 2016'
+
+MICRO_SIGN = '\u00B5'
+GREEK_MU = '\u03BC'
+
+# define the multipliers for making floats into strings
+# this happens at load time, so the time taken is 'lost' in the overall program load time
+
+ms = {+3:'k', +6:'M', +9:'G', +12:'T', +15:'P', +18:'E', +21:'Z', +24:'Y',
+      -3:'m', -6:'u', -9:'n', -12:'p', -15:'f', -18:'a', -21:'z', -24:'y'}
+
+# define the weights for decoding strings to floats
+# invert the multipliers that we have
+weights = {}
+for m in ms:
+    weights[ms[m]] = m
+    
+weights[MICRO_SIGN] = -6     # add both micros
+weights[GREEK_MU] = -6
+
+longest_weights = {}         # add the meg variations
+longest_weights['mega'] = 6  # in size order
+longest_weights['MEGA'] = 6
+longest_weights['Mega'] = 6  # these need to be longer due to the trailing a != atto
+
+long_weights = {}
+long_weights['meg'] = 6          
+long_weights['MEG'] = 6           
+long_weights['Meg'] = 6
+
+long_weights['da'] = 1       # trailing a != atto, so put it in longer
+weights['d'] = -1             # add the non-3 BIPM SI prefixes, because we can
+weights['c'] = -2             # and it makes listening more forgiving
+weights['h'] = 2
+
+        
+
+# what *ck-wit at BIPM thought Exa would make a good multiplier
+# when 'e' was already in use for exponents???
+# this means that '34E3' will be interpretted as 34000, rather than 34.3 Exa
+# but 34E will get interpretted as Exa, as float() doesn't like it
+
+def eng_str(x, digits=6, limits=(-12,9), micro='u', mega='M',
+           infix=False, show_plus=False, show_trailing_zeros=False):
+    """Return a formatted string, using powers of 1000, and BIPM engineering multipliers
+
+    digits      integer, defaults to 6
+                <1 corrected to 1, large values honoured
+
+    limits      tuple of integers, defaults to (-12,9), the electronics range pico to Giga
+                restricts the substitution range to more common prefixes
+                order can be (low, high) or (high, low)
+
+    micro       string for -6 substitution, defaults to 'u'
+                unicode MICRO_SIGN and GREEK_MU available as module constants
+    
+    mega        string for +6, defaults to 'M', meg is used by most SPICEs
+
+    infix       defaults to False, use decimal point and suffix, if True, replace decimal with symbol
+
+    show_plus   defaults to False, minus is always shown regardless of this switch
+
+    show_trailing_zeros   defaults to False, zeros truncated as far as possible             
+            
+    check a few simple random numbers with defaults
+    >>> [eng_str(n) for n in (3, 1.2e3, 30e3, -0.007)]
+    ['3', '1.2k', '30k', '-7m']
+
+    check some 'normal' big numbers, and the default limits behaviour
+    >>> [eng_str(4*pow(10,n)) for n in range(4, 13)]
+    ['40k', '400k', '4M', '40M', '400M', '4G', '40G', '400G', '4e+12']
+    
+    check all the large multipliers, and excess limit behaviour
+    >>> [eng_str(3*pow(10,n), limits=(100,-100)) for n in range(3, 28, 3)]
+    ['3k', '3M', '3G', '3T', '3P', '3E', '3Z', '3Y', '3e+27']
+
+    check some 'normal' small numbers, and the limits behaviour    
+    >>> [eng_str(4*pow(10,-n)) for n in range(4, 18, 2)]    
+    ['400u', '4u', '40n', '400p', '4p', '40e-15', '400e-18']
+    
+    check all the small multipliers
+    >>> [eng_str(3*pow(10,n), limits=(100,-100)) for n in range(-3, -28, -3)]
+    ['3m', '3u', '3n', '3p', '3f', '3a', '3z', '3y', '3e-27']
+
+    check the digits parameter and trailing zeros, which defaults to false
+    >>> [eng_str(314159, digits=n) for n in range(8)]
+    ['300k', '300k', '310k', '314k', '314.2k', '314.16k', '314.159k', '314.159k']
+
+    check trailing zeros on
+    >>> [eng_str(314159, digits=8, show_trailing_zeros=stz) for stz in (True, False)] 
+    ['314.15900k', '314.159k']
+
+    demonstrate infix (ugly, isn't it)
+    >>> [eng_str(314159, infix=infx) for infx in (True, False)]
+    ['314k159', '314.159k']
+    
+    check the sign control is working
+    >>> [eng_str(n, show_plus=sp) for (n, sp) in ((1, False), (1, True), (-1, False), (-1, True))]
+    ['1', '+1', '-1', '-1']
+
+    huge numbers of digits?
+    >>> eng_str(314159, digits=30, show_trailing_zeros=True)
+    '314.159000000000000000000000000k'
+    
+    fractional digits?
+    >>> eng_str(314159, digits=5.5)
+    '314.16k'
+    
+    extreme number sizes (within the range of float)
+    >>> [eng_str(3*pow(10,n)) for n in range(-306, 307, 102)]
+    ['3e-306', '3e-204', '3e-102', '3', '3e+102', '3e+204', '3e+306']
+
+    check the e+06 substitutions, normal and bizarre (I can't think of a good reason to trap) 
+    >>> [eng_str(4e8, mega=n) for n in ('M', 'meg', 'Mega', 'foo')]       
+    ['400M', '400meg', '400Mega', '400foo']
+
+    check the e-06 substitutions, normal and bizarre (I still can't think of a good reason to trap) 
+    >>> [eng_str(4e-5, micro=n) for n in ('u', MICRO_SIGN, GREEK_MU, 'z')]       
+    ['40u', '40µ', '40μ', '40z']
     
     """
 
-    # capture the sign
-    if x<0:
-        sign = u'-'
+
+
+    # don't be silly
+    digits = int(digits)      # is this defensive? are we going to get a float?
+    if digits<1:
+        digits=1
+
+    # let the e format do the heavy lifting
+    # force a + sign to regularise the format
+    # though we still have to look for the e as the exp field width can vary
+
+    e_str = '{:+.{fdigits}e}'.format(x, fdigits=digits-1)
+
+    # now pull the fields apart
+    sign = e_str[0]
+    ipart = e_str[1]
+    dp = '.'
+    fpart = e_str[3:(digits+2)]
+    exp = int(e_str[e_str.find('e')+1:])
+
+    # print('raw e format    ', sign, ipart, dp, fpart, exp)
+
+    # find whether exp is a factor of 3, and adjust if not
+    adjustment = exp%3
+    # beef up length of fpart if it needs it
+    while len(fpart)<adjustment:
+        fpart += '0'
+    # transfer digits from fpart to ipart
+    ipart += fpart[:adjustment]
+    fpart = fpart[adjustment:]
+    # and fix the exponent
+    exp -= adjustment
+
+    # print('normed to 3     ', sign, ipart, dp, fpart, exp)
+
+    # optionally take off the trailing zeros
+    if not show_trailing_zeros:
+        fpart = fpart.rstrip('0')
+    # and kill the decimal point if the fractional part has gone
+    if not(fpart):
+        dp = ''
+
+
+    # print('removed zeros   ', sign, ipart, dp, fpart, exp)
+
+    # now we have to figure out exactly how to format this puppy
+    # I am going to try to minimise if then else try except special cases
+    # and just make it run a standard process
+
+    # find the limits that we are going to use, and shield the dict
+    hilim = min(max(limits), 24)
+    lolim = max(min(limits), -24)
+
+    # deal with the +6 and -6 special cases by putting them into the dict
+    ms[6] = mega
+    ms[-6] = micro
+
+    # deal with the special case of 0 for infix/postfix use by putting into dict
+    # print('infix is ', infix)
+    if infix:
+        ms[0] = '.'
     else:
-        sign = u''
-    # and lose it from the number
-    absx = abs(x)
+        ms[0] = ''
 
-    if digits:
-        # if number of digits specified, use e format
-        # it always produces one digit before the point, and dp digits after
-        # use int to be very accepting about how digits is specified
-        dp = max((0, int(digits)-1))
-        x_str = u'{:.{dp}e}'.format(absx, dp=dp)
-        (mant, exp) = x_str.split(u'e')
-        # drop the dp from the mantissa and pad with zeroes to simplify scaling
-        mant = mant.replace(u'.', u'')+u'00'
-        exp = int(exp)
-        dp_pos = 1
-    else:
-        # use str() to get all the digits it thinks are relevant
-        # unfortunately it has a variable format for numbers close to unity
-        #print(absx)
-        x_str = str(absx)
-        #print(x_str)
-        if 'e' in x_str:      # it's normalised like e format
-            (mant, exp) = x_str.split(u'e')    # so we can pull it apart like e
-            mant = mant.replace(u'.', u'')+u'00'
-            exp = int(exp)
-            dp_pos = 1
-        else:      # it's non-normalised, with an exponent of 0
-            mant = x_str
-            exp = 0
-            dp_pos = x_str.index('.')
-            mant = mant.replace(u'.', u'')+u'00'
-            while mant[0]=='0':     # if we have leading zeros
-                exp -= 1
-                mant = mant[1:]
+    # is substitution possible?
+    can_subs = lolim <= exp <= hilim
+    # print('can we substitute?', can_subs)
+    if not can_subs:
+        mult = 'e{:+}'.format(exp)
 
-            
+    # remove the plus if we don't need it
+    if (not show_plus) and (sign=='+'):
+        sign = ''
+
+    # finally
+    # if we can make an infix substitution
+    if infix and can_subs:
+        # print('doing infix subs')
+        return '{}{}{}{}'.format(sign, ipart, ms[exp], fpart)
+
+    # if we can make a postfix substitution
+    if can_subs:
+        # print('doing postfix subs')
+        return '{}{}{}{}{}'.format(sign, ipart, dp, fpart, ms[exp])
+
+    # we can't make any substitution, return numeric
+    # print('doing the default formatting')
+    return '{}{}{}{}{}'.format(sign, ipart, dp, fpart, mult)
 
 
-    # find out how far we are from a multiple of 3, sn = shift_needed
-    sn = exp%3      # modulus works in the correct direction for -ve as well
-    # re-insert the dp, and adjust the exponent, to the shift_needed
-    m_str = mant[:(dp_pos+sn)]+'.'+mant[(dp_pos+sn):]
-    exp -= sn
 
-    # now trim the trailing zeros, then the trailing point if remaining
-    # use seperate steps because we don't want to trim any 0s from the integer
-    m_str = m_str.rstrip(u'0')
-    m_str = m_str.rstrip(u'.')
+def eng_float(x_org):
+    """[eng_f]Return a float, interpretting BIPM engineering prefixes[end_help]
 
-    # can we make a substitution (exp within limits, and defined)
-    if (exp in subs) and (min(limits) <= exp <= max(limits)):
-        exp_str = subs[exp]
-    else:
-        exp_str = u'e{:+03d}'.format(exp)
+    identify and substitute all prefix symbols defined by the BIPM
+    and various versions of 'meg' used by most SPICE programs
 
-    if greek and exp_str == u'u':
-        exp_str = u'\u00b5'
+    raise ValueError if the string is empty or cannot be interpretted as an engineering float
 
-    return sign+m_str+exp_str
-
-def eng_float(x):
-    """ parse a string in engineering format into a float
-
-    accept suffix or infix, and all defined multipliers, including greek micro
-
-    >>> eng_float('2k7')
-    2700.0
-    >>> eng_float('2.7k')
-    2700.0
+    check the simple >1 multipliers
+    >>> [eng_float(s) for s in ('1', '1da', '1h', '1k', '1M', '1meg', '1Mega', '1G')]
+    [1.0, 10.0, 100.0, 1000.0, 1000000.0, 1000000.0, 1000000.0, 1000000000.0]
     
-    >>> eng_float('k7')
-    700.0
+    >>> [eng_float(s) for s in ('1T', '1P', '1E', '1Z', '1Y')]
+    [1000000000000.0, 1000000000000000.0, 1e+18, 1e+21, 1e+24]
+
+    check the simple <1 multipliers
+    >>> [eng_float(s) for s in ('1', '1d', '1c', '1m', '1u', '1'+MICRO_SIGN, '1'+GREEK_MU)]
+    [1.0, 0.1, 0.01, 0.001, 1e-06, 1e-06, 1e-06]
     
-    >>> eng_float('270u')
-    0.00027
-    >>> eng_float('270\u00b5')
-    0.00027
-        
-    >>> eng_float('2k7m') # doctest: +IGNORE_EXCEPTION_DETAIL
+    >>> [eng_float(s) for s in ('1p', '1f', '1a', '1z', '1y')]
+    [1e-12, 1e-15, 1e-18, 1e-21, 1e-24]
+
+    check infix and suffix forms
+    >>> [eng_float(s) for s in ('1.3k', '1k3', '1u3', '1.3u')]
+    [1300.0, 1300.0, 1.3e-06, 1.3e-06]
+
+    check negative numbers
+    >>> [eng_float(s) for s in ('-1.3k', '-1k3', '-1u3', '-1.3u')]
+    [-1300.0, -1300.0, -1.3e-06, -1.3e-06]
+
+    empty input
+    >>> eng_float('')
     Traceback (most recent call last):
         ...
-    ValueError
+    ValueError: no input, nothing to do
 
+    illegal format with infix
+    >>> eng_float('1.2m3')    
+    Traceback (most recent call last):
+        ...
+    ValueError: "1.2m3" found infix "m" but "1.2.3e-3" not parsed
+
+    illegal format with suffix
+    >>> eng_float('14.3mm')    
+    Traceback (most recent call last):
+        ...
+    ValueError: "14.3mm" found suffix "m" but "14.3me-3" not parsed
+
+    unrecognised suffix
+    >>> eng_float('1t')    
+    Traceback (most recent call last):
+        ...  
+    ValueError: could not parse "1t" as float, no multiplier found
+
+    bare suffix
+    >>> eng_float('m')    
+    Traceback (most recent call last):
+        ... 
+    ValueError: "m" found suffix "m" but "e-3" not parsed
+    
+    we let float() do the heavy lifting    
     """
 
-    # let float() to do the heavy lifting
-    
-    # is it a straight float?
+    if len(x_org)==0:
+        raise ValueError('no input, nothing to do')
+
     try:
-        return float(x)
+        return float(x_org)
     except ValueError:
         pass
 
-    # OK, so it just choked on trying the string as is
-    # does it have a suffix, this will be the last character
-    # make sure there's no whitespace to clog things up
-    x = x.strip()
-    if x[-1] in subs_inv:
-        # yay, it's found one, replace it with exx
-        x_try = x[:-1]+'e{}'.format(subs_inv[x[-1]])
+    # so float() couldn't make sense of it
+    # let's whip off any non-printing characters before we start
+    x = x_org.strip()
+  
+    # does it end in any of our pre-defined multipliers, check long to short?
+    cand = None
+    for search_in in (longest_weights, long_weights, weights):
+        if cand:
+            break
+        for suffix in search_in:
+            if cand:
+                break
+            if x.endswith(suffix):
+                cand = suffix
+                cand_weight = search_in[suffix]
+
+    if cand:
+        # got one! remove it
+        x = x[:(-len(cand))]
+        # and replace it with an exponent
+        x += 'e'+str(cand_weight)
+        # and now see whether float can make sense of it
+        # use this two-step process as it delivers clean ValueErrors
+
         try:
-            return float(x_try)
+            thing = float(x)
         except ValueError:
-            # if replacing the suffix with exx didn't work, that's fatal
-            raise ValueError('float() could not parse {} or {}'.format(x, x_try))
+            thing = None
 
-    # the only thing left to try is an infix multiplier
-    # this replaces the decimal point
-    # so if we have a decimal point at this stage, that's fatal
-    if '.' in x:
-        raise ValueError('{} is not a float, has no valid suffix, but has a decimal point'.format(x))
-
-    # no decimal point huh! try looking for an infix multiplier
-    for key in subs_inv:
-        if key in x:
-            # we have an infix candidate
-            # replace it with a decimal point and append exx
-            x_try = x.replace(key, u'.')
-            x_try += 'e{}'.format(subs_inv[key])
-            try:
-                return float(x_try)
-            except ValueError:
-                # if replacing an infix multiplier wouldn't work, that's fatal
-                raise ValueError('float() could not parse {} or {}'.format(x, x_try))
-
-    # if we get here, we've tried everything
-    raise ValueError('float() could not parse {} or any substitution'.format(x))
+        if thing==None:  
+            raise ValueError('"{}" found suffix "{}" but "{}" not parsed'.format(x_org, cand, x))
+        else:
+            return thing
         
+    # nope, if we get here, float choked on the substitution
+    # so does it have an infix embedded in it?
+    # need to check in the order longest to shortest
+    # to avoid existing prematurely with 'm', when there's a 'mega'
+        
+    cand = None
+    for search_in in (longest_weights, long_weights, weights):
+        if cand:
+            break
+        for infix in search_in:
+            if cand:
+                break
+            pos = x.find(infix)
+            if pos >= 0:
+                cand = infix
+                cand_weight = search_in[infix]
+
+    if cand:
+        # got one! remove it
+        first = x[:pos]
+        last = x[(pos+len(cand)):]
+        # replace with decimal point and add a numeric exponent
+        x = first+'.'+last+'e'+str(cand_weight)
+        # and now can float() chow down on it?
+
+        try:
+            thing = float(x)
+        except ValueError:
+            thing = None
+
+        if thing==None:
+            raise ValueError('"{}" found infix "{}" but "{}" not parsed'.format(x_org, cand, x))
+        else:
+            return thing
+
+    raise ValueError('could not parse "{}" as float, no multiplier found'.format(x_org))
+
+
 
 
 if __name__ == '__main__':
     import doctest
-    doctest.testmod(verbose=True)
+    print('running doctest')
+    print('nothing else below here means everything has passed')
+    doctest.testmod()
 
 
+
+"""
+if __name__ == '__main__':
+    import tkinter as tki
+    import GUI_IO_widget as giw
+
+    def execute_func():
+        ps = panel.get()
+        # print(ps)
+        n = ps['number']
+        ds = ps['digits']
+        zeros = ps['trailing zeros']
+        infix = ps['infix']
+        mustr = ps['micro_str']
+        Mstr = ps['mega_str']
+
+        
+        rep = eng_str(n, ds, show_trailing_zeros=zeros, infix=infix, micro=mustr, mega=Mstr)
+        panel.set_data('output', rep)
+
+    def exec_float_func():
+        fs = fanel.get()
+        num = fs['eng_float func']
+        fanel.set_data('output', str(num))
+        
+    root = tki.Tk()
+    panel = giw.GUI_inputs(root, execute=execute_func, text='Test eng_str()')
+    panel.pack()
+    panel.add('number', conv=float)
+    panel.add('digits', conv=int)
+    panel.add('trailing zeros', conv=bool)
+    panel.add('infix', conv=bool)
+    panel.add('micro_str', data='u')
+    panel.add('mega_str', data='M')
+    panel.add('output', output_only=True)
+
+    fanel = giw.GUI_inputs(root, execute=exec_float_func, text='Test eng_float()')
+    fanel.pack()
+    fanel.add('eng_float func', conv=eng_float, data=1)
+    fanel.add('output', output_only=True)
+    
+    root.mainloop()
+"""
+
+
+
+"""
+if __name__ == '__main__':
+    a = 2
+    while a:          
+        a = input('test string - ')
+        try:
+            print(eng_float(a))
+        except ValueError as ve:
+            print('threw value error')
+            print(ve)
+"""
+
+          
+          
+    
+
+        
+
+
+
+
+
+    
+    
+    
